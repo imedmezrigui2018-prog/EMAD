@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brett Bau - Tableau de Bord</title>
+
+    <!-- Configuration PWA -->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/images/icon-192.png">
+    <meta name="theme-color" content="#0d1b2a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Enregistrement du Service Worker PWA -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js')
+          .then(() => console.log('✅ Service Worker PWA enregistré !'))
+          .catch(err => console.error('❌ Erreur Service Worker:', err));
+      }
+    </script>
+</head>
+<body>
+
+    <!-- NAVBAR -->
+    <nav class="navbar">
+        <div class="logo">Brett Bau - Espace Maintenance</div>
+        <a href="login.html" class="logout-btn">Se déconnecter</a>
+    </nav>
+
+    <!-- Conteneur pour les alertes du Dashboard -->
+    <div id="dashboard-alerts" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;"></div>
+
+    <main class="main-content">
+        <div class="welcome-section">
+            <h2>Bonjour,</h2>
+            <p>Prêt pour la maintenance d'un Board ? Entrez son identifiant ci-dessous.</p>
+        </div>
+
+        <div class="search-container">
+            <h3>Rechercher un Board</h3>
+            <form id="searchForm" class="search-box" autocomplete="off">
+                <div style="position: relative; flex: 1;">
+                    <input type="text" id="board-id-input" name="board_id" placeholder="Entrez l'ID du Board" required autocomplete="off">
+                    <div id="suggestions-list" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: #0f172a; border: 1px solid #334155; border-radius: 6px; margin-top: 4px; max-height: 220px; overflow-y: auto; z-index: 10;"></div>
+                </div>
+                <button type="submit" class="btn-search">Rechercher</button>
+            </form>
+            <p id="search-error-message" style="color: #e63946; margin-top: 1rem; font-size: 0.9rem; display: none;"></p>
+        </div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <script>
+        // 1. Récupérer le nom de l'ouvrier stocké dans le localStorage lors du login
+        const nomOuvrier = localStorage.getItem('nomOuvrier');
+        const welcomeTitle = document.querySelector('.welcome-section h2');
+
+        if (nomOuvrier) {
+            welcomeTitle.textContent = `Bonjour, ${nomOuvrier} 👋`;
+        } else {
+            window.location.href = 'login.html';
+        }
+
+        // 2. Gestion du bouton de déconnexion
+        const logoutBtn = document.querySelector('.logout-btn');
+        if (logoutBtn) {
+            logoutBtn.addEventListener('click', (e) => {
+                localStorage.removeItem('nomOuvrier');
+            });
+        }
+
+        // 3. Demander la permission d'afficher des notifications système dès l'arrivée sur la page
+        if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
+            Notification.requestPermission();
+        }
+
+        // Liste de tous les boards, chargée une seule fois et réutilisée pour les alertes et l'autocomplétion
+        let tousLesBoards = [];
+
+        // Fonction pour déclencher une notification système (regroupée)
+        function envoyerNotificationSysteme(firstBoardId, autresCount, joursRestants) {
+            if ("Notification" in window && Notification.permission === "granted") {
+                const boardTexte = autresCount > 0 ? `${firstBoardId} et ${autresCount} autres` : firstBoardId;
+                const titre = joursRestants === 0
+                    ? `Maintenance aujourd'hui : ${boardTexte}`
+                    : `Retard maintenance : ${boardTexte}`;
+                const corps = joursRestants === 0
+                    ? `Ces boards nécessitent une maintenance aujourd'hui !`
+                    : `Ces boards sont en retard de ${Math.abs(joursRestants)} jour(s) de préventif !`;
+
+                const notif = new Notification(titre, {
+                    body: corps,
+                    icon: 'https://cdn-icons-png.flaticon.com/512/564/564619.png'
+                });
+
+                notif.onclick = () => {
+                    window.focus();
+                    if (autresCount === 0) window.location.href = `board-details.html?board_id=${firstBoardId}`;
+                };
+            }
+        }
+
+        // Fonction pour vérifier les maintenances préventives et les regrouper
+        function verifierAlertesPreventives(boards) {
+            const alertsContainer = document.getElementById('dashboard-alerts');
+            alertsContainer.innerHTML = '';
+
+            const aujourdhui = new Date();
+            const alertesGroupes = {}; // Stockage des alertes par jours de retard
+
+            // Grouper les boards par nombre de jours restants
+            boards.forEach(board => {
+                if (board.date_preventive) {
+                    const datePrev = new Date(board.date_preventive);
+                    const differenceTemps = datePrev.getTime() - aujourdhui.getTime();
+                    const joursRestants = Math.ceil(differenceTemps / (1000 * 3600 * 24));
+
+                    if (joursRestants <= 0 && joursRestants >= -3) {
+                        if (!alertesGroupes[joursRestants]) alertesGroupes[joursRestants] = [];
+                        alertesGroupes[joursRestants].push(board.id);
+                    }
+                }
+            });
+
+            // Afficher les alertes regroupées
+            Object.keys(alertesGroupes).forEach(joursRestantsStr => {
+                const joursRestants = parseInt(joursRestantsStr);
+                const listeBoards = alertesGroupes[joursRestantsStr];
+                
+                const firstBoard = listeBoards[0];
+                const autresCount = listeBoards.length - 1;
+
+                const alertDiv = document.createElement('div');
+                alertDiv.style.padding = '12px 20px';
+                alertDiv.style.borderRadius = '6px';
+                alertDiv.style.fontWeight = 'bold';
+                alertDiv.style.backgroundColor = '#e63946';
+                alertDiv.style.color = 'white';
+
+                let titreHtml = '';
+                if (joursRestants === 0) {
+                    titreHtml = `🚨 ATTENTION : Le board <strong>${firstBoard}</strong> ${autresCount > 0 ? `et <span class="toggle-autres" style="text-decoration: underline; cursor: pointer;">${autresCount} autres</span> nécessitent` : 'nécessite'} une maintenance aujourd'hui !`;
+                } else {
+                    titreHtml = `🚨 RAPPEL MAINTENANCE : Le board <strong>${firstBoard}</strong> ${autresCount > 0 ? `et <span class="toggle-autres" style="text-decoration: underline; cursor: pointer;">${autresCount} autres</span> sont en retard` : 'est en retard'} de préventif ! (${Math.abs(joursRestants)} jour(s))`;
+                }
+
+                alertDiv.innerHTML = `<div>${titreHtml}</div>`;
+
+                if (autresCount === 0) {
+                    // S'il n'y a qu'un seul board, un clic sur le bloc complet amène à la page
+                    alertDiv.style.cursor = 'pointer';
+                    alertDiv.onclick = () => window.location.href = `board-details.html?board_id=${firstBoard}`;
+                } else {
+                    // S'il y a plusieurs boards, on crée une sous-liste cachée
+                    const hiddenList = document.createElement('div');
+                    hiddenList.style.display = 'none';
+                    hiddenList.style.marginTop = '10px';
+                    hiddenList.style.paddingTop = '10px';
+                    hiddenList.style.borderTop = '1px solid rgba(255, 255, 255, 0.4)';
+                    hiddenList.style.fontSize = '0.9em';
+                    
+                    listeBoards.forEach(bId => {
+                        const bLink = document.createElement('div');
+                        bLink.innerHTML = `👉 Maintenir le board <strong>${bId}</strong>`;
+                        bLink.style.cursor = 'pointer';
+                        bLink.style.padding = '6px 0';
+                        bLink.onclick = () => window.location.href = `board-details.html?board_id=${bId}`;
+                        hiddenList.appendChild(bLink);
+                    });
+                    
+                    alertDiv.appendChild(hiddenList);
+
+                    // Gestionnaire de clic pour dérouler/enrouler la liste
+                    const btnToggle = alertDiv.querySelector('.toggle-autres');
+                    if (btnToggle) {
+                        btnToggle.onclick = (e) => {
+                            e.stopPropagation(); // Évite tout autre comportement
+                            hiddenList.style.display = hiddenList.style.display === 'none' ? 'block' : 'none';
+                        };
+                    }
+                }
+
+                alertsContainer.appendChild(alertDiv);
+                
+                // On envoie la notification système du navigateur regroupée
+                envoyerNotificationSysteme(firstBoard, autresCount, joursRestants);
+            });
+        }
+
+        // Fonction pour charger tous les boards une seule fois
+        async function chargerBoards() {
+            try {
+                const response = await fetch('/api/boards');
+                const data = await response.json();
+
+                if (data.success && data.boards) {
+                    tousLesBoards = data.boards;
+                    verifierAlertesPreventives(tousLesBoards);
+                }
+            } catch (error) {
+                console.error("Erreur de chargement des boards :", error);
+            }
+        }
+
+        // 4. Autocomplétion
+        const boardInput = document.getElementById('board-id-input');
+        const suggestionsList = document.getElementById('suggestions-list');
+        const searchErrorMessage = document.getElementById('search-error-message');
+
+        boardInput.addEventListener('input', () => {
+            const query = boardInput.value.trim().toUpperCase();
+            suggestionsList.innerHTML = '';
+
+            if (query.length === 0) {
+                suggestionsList.style.display = 'none';
+                return;
+            }
+
+            const correspondances = tousLesBoards.filter(b => b.id.toUpperCase().startsWith(query));
+
+            if (correspondances.length === 0) {
+                suggestionsList.style.display = 'none';
+                return;
+            }
+
+            correspondances.forEach(board => {
+                const item = document.createElement('div');
+                item.textContent = board.id;
+                item.style.padding = '10px 14px';
+                item.style.cursor = 'pointer';
+                item.style.color = 'white';
+                item.style.borderBottom = '1px solid #1c2738';
+
+                item.addEventListener('mouseenter', () => {
+                    item.style.backgroundColor = '#1c2738';
+                });
+                item.addEventListener('mouseleave', () => {
+                    item.style.backgroundColor = 'transparent';
+                });
+
+                item.addEventListener('click', () => {
+                    window.location.href = `board-details.html?board_id=${board.id}`;
+                });
+
+                suggestionsList.appendChild(item);
+            });
+
+            suggestionsList.style.display = 'block';
+        });
+
+        // Fermer la liste de suggestions si on clique ailleurs
+        document.addEventListener('click', (e) => {
+            if (!boardInput.contains(e.target) && !suggestionsList.contains(e.target)) {
+                suggestionsList.style.display = 'none';
+            }
+        });
+
+        // 5. Recherche via le bouton
+        const searchForm = document.getElementById('searchForm');
+
+        searchForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            searchErrorMessage.style.display = 'none';
+            suggestionsList.style.display = 'none';
+
+            const boardId = boardInput.value.trim();
+            if (!boardId) return;
+
+            try {
+                const response = await fetch(`/api/board/${boardId}`);
+                const data = await response.json();
+
+                if (data.success && data.board) {
+                    window.location.href = `board-details.html?board_id=${boardId}`;
+                } else {
+                    searchErrorMessage.textContent = "Cet identifiant de Board n'existe pas.";
+                    searchErrorMessage.style.display = 'block';
+                }
+            } catch (error) {
+                searchErrorMessage.textContent = "Erreur de connexion au serveur.";
+                searchErrorMessage.style.display = 'block';
+            }
+        });
+
+        // Lancer le chargement
+        chargerBoards();
+    </script>
+</body>
+</html>
